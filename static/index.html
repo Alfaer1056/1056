@@ -1,0 +1,513 @@
+<!-- static/index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC Suite: Видео, Чат, Файлы</title>
+    <style>
+        :root {
+            --primary: #4a6fa5;
+            --secondary: #166088;
+            --dark: #0a2342;
+            --light: #f8f9fa;
+            --danger: #d00000;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            height: 100vh;
+            gap: 10px;
+            padding: 10px;
+        }
+        .video-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        video {
+            width: 100%;
+            background: #000;
+            border-radius: 8px;
+            transform: scaleX(-1); /* Зеркальное отображение для камеры */
+        }
+        #remoteVideo {
+            transform: none;
+        }
+        .control-panel {
+            display: flex;
+            gap: 8px;
+            margin: 10px 0;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .primary-btn {
+            background: var(--primary);
+            color: white;
+        }
+        .danger-btn {
+            background: var(--danger);
+            color: white;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .sidebar {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+        }
+        #chatContainer {
+            flex-grow: 1;
+            overflow-y: auto;
+            margin: 10px 0;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        .message {
+            margin-bottom: 8px;
+            padding: 8px;
+            border-radius: 4px;
+            word-break: break-word;
+        }
+        .user-message {
+            background: #e3f2fd;
+        }
+        .system-message {
+            background: #e8f5e9;
+            font-style: italic;
+        }
+        .file-message {
+            background: #fff3e0;
+        }
+        .user-list {
+            margin-top: 10px;
+        }
+        .user-item {
+            padding: 5px;
+            margin: 3px 0;
+            background: #f0f0f0;
+            border-radius: 3px;
+        }
+        #fileProgress {
+            display: none;
+            margin-top: 10px;
+        }
+        progress {
+            width: 100%;
+        }
+        #fileInput {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="main-content">
+            <h1>Комната: <span id="roomId"></span></h1>
+            <div class="video-container">
+                <video id="localVideo" autoplay muted playsinline></video>
+                <video id="remoteVideo" autoplay playsinline></video>
+            </div>
+
+            <div class="control-panel">
+                <button id="startButton" class="primary-btn">Включить камеру</button>
+                <button id="screenShareButton" class="primary-btn">Демонстрация экрана</button>
+                <button id="recordButton" class="primary-btn">Начать запись</button>
+                <button id="stopRecordButton" class="danger-btn" disabled>Остановить запись</button>
+                <button onclick="document.getElementById('fileInput').click()" class="primary-btn">Отправить файл</button>
+                <input type="file" id="fileInput">
+            </div>
+
+            <div id="fileProgress">
+                <p>Отправка файла: <span id="fileName"></span></p>
+                <progress value="0" max="100"></progress>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <h3>Участники (<span id="usersCount">0</span>)</h3>
+            <div id="usersList" class="user-list"></div>
+
+            <h3>Чат</h3>
+            <div id="chatContainer"></div>
+
+            <div class="chat-controls">
+                <input type="text" id="messageInput" placeholder="Введите сообщение...">
+                <button onclick="sendMessage()" class="primary-btn">Отправить</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Элементы интерфейса
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const startButton = document.getElementById('startButton');
+        const screenShareButton = document.getElementById('screenShareButton');
+        const recordButton = document.getElementById('recordButton');
+        const stopRecordButton = document.getElementById('stopRecordButton');
+        const fileInput = document.getElementById('fileInput');
+        const fileProgress = document.getElementById('fileProgress');
+        const fileName = document.getElementById('fileName');
+        const chatContainer = document.getElementById('chatContainer');
+        const messageInput = document.getElementById('messageInput');
+        const usersList = document.getElementById('usersList');
+        const usersCount = document.getElementById('usersCount');
+        const roomIdDisplay = document.getElementById('roomId');
+
+        // Генерация ID
+        const localId = Math.random().toString(36).substr(2, 9);
+        const roomId = new URLSearchParams(window.location.search).get('room') || 'default-room';
+        roomIdDisplay.textContent = roomId;
+
+        // WebRTC переменные
+        let localStream;
+        let peerConnection;
+        let screenStream;
+        let mediaRecorder;
+        let recordedChunks = [];
+        const rtcConfig = {
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                // Добавьте ваш TURN сервер здесь для продакшена
+            ]
+        };
+
+        // WebSocket соединение
+        const ws = new WebSocket(`ws://${window.location.host}/ws/${roomId}/${localId}`);
+
+        // ========================
+        // Основные функции
+        // ========================
+
+        // Инициализация камеры
+        async function startCamera() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: true
+                });
+                localVideo.srcObject = localStream;
+                startButton.disabled = true;
+            } catch (err) {
+                console.error("Ошибка доступа к камере:", err);
+                addSystemMessage("Не удалось получить доступ к камере");
+            }
+        }
+
+        // Демонстрация экрана
+        async function startScreenSharing() {
+            try {
+                screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: true
+                });
+
+                const videoTrack = screenStream.getVideoTracks()[0];
+                const sender = peerConnection.getSenders().find(s => s.track.kind === 'video');
+
+                if (sender) {
+                    await sender.replaceTrack(videoTrack);
+                    localVideo.srcObject = screenStream;
+                    addSystemMessage("Вы начали демонстрацию экрана");
+
+                    videoTrack.onended = () => {
+                        if (localStream) {
+                            const originalVideo = localStream.getVideoTracks()[0];
+                            sender.replaceTrack(originalVideo);
+                            localVideo.srcObject = localStream;
+                            addSystemMessage("Вы прекратили демонстрацию экрана");
+                        }
+                    };
+                }
+            } catch (err) {
+                console.error("Ошибка демонстрации экрана:", err);
+                addSystemMessage("Не удалось начать демонстрацию экрана");
+            }
+        }
+
+        // Запись звонка
+        function startRecording() {
+            if (!remoteVideo.srcObject) {
+                addSystemMessage("Нет активного звонка для записи");
+                return;
+            }
+
+            recordedChunks = [];
+            mediaRecorder = new MediaRecorder(remoteVideo.srcObject, {
+                mimeType: 'video/webm'
+            });
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) {
+                    recordedChunks.push(e.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `запись-${new Date().toISOString()}.webm`;
+                a.click();
+                addSystemMessage("Запись сохранена");
+            };
+
+            mediaRecorder.start(1000); // Собираем данные каждую секунду
+            recordButton.disabled = true;
+            stopRecordButton.disabled = false;
+            addSystemMessage("Запись начата");
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                recordButton.disabled = false;
+                stopRecordButton.disabled = true;
+            }
+        }
+
+        // ========================
+        // Чат и файлы
+        // ========================
+
+        function addMessageToChat(sender, text, type = 'user', fileUrl = null) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}-message`;
+
+            if (type === 'file') {
+                messageDiv.innerHTML = `
+                    <strong>${sender}:</strong><br>
+                    <a href="${fileUrl}" download>${text}</a>
+                `;
+            } else if (type === 'system') {
+                messageDiv.innerHTML = `<em>${text}</em>`;
+            } else {
+                messageDiv.innerHTML = `<strong>${sender}:</strong> ${text}`;
+            }
+
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function addSystemMessage(text) {
+            addMessageToChat('', text, 'system');
+        }
+
+        function sendMessage() {
+            const text = messageInput.value.trim();
+            if (text && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: "chat_message",
+                    text: text
+                }));
+                addMessageToChat(localId, text);
+                messageInput.value = '';
+            }
+        }
+
+        function updateUsersList(users) {
+            usersList.innerHTML = users
+                .filter(id => id !== localId)
+                .map(id => `<div class="user-item">${id}</div>`)
+                .join('');
+            usersCount.textContent = users.length;
+        }
+
+        // Отправка файла
+        fileInput.onchange = async () => {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            if (file.size > 50 * 1024 * 1024) { // 50MB лимит
+                addSystemMessage("Файл слишком большой (макс. 50MB)");
+                return;
+            }
+
+            const fileId = `${Date.now()}-${file.name}`;
+            fileName.textContent = file.name;
+            fileProgress.style.display = 'block';
+
+            // Отправка метаданных
+            ws.send(JSON.stringify({
+                type: "file_meta",
+                file_name: file.name,
+                file_size: file.size,
+                file_id: fileId
+            }));
+
+            // Загрузка файла на сервер
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const xhr = new XMLHttpRequest();
+            xhr.upload.onprogress = (e) => {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                fileProgress.querySelector('progress').value = percent;
+            };
+
+            xhr.onload = () => {
+                fileProgress.style.display = 'none';
+                addMessageToChat(localId, file.name, 'file', `/uploads/${fileId}`);
+            };
+
+            xhr.open('POST', `/upload/${roomId}/${localId}`, true);
+            xhr.send(formData);
+        };
+
+        // ========================
+        // WebRTC логика
+        // ========================
+
+        async function setupPeerConnection() {
+            peerConnection = new RTCPeerConnection(rtcConfig);
+
+            // Добавляем локальные треки если есть
+            if (localStream) {
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+            }
+
+            // Обработчики ICE кандидатов
+            peerConnection.onicecandidate = (e) => {
+                if (e.candidate && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: "ice_candidate",
+                        candidate: e.candidate,
+                        sender_id: localId
+                    }));
+                }
+            };
+
+            // Получение удаленного потока
+            peerConnection.ontrack = (e) => {
+                remoteVideo.srcObject = e.streams[0];
+            };
+        }
+
+        async function callUser(targetId) {
+            if (!peerConnection) await setupPeerConnection();
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            ws.send(JSON.stringify({
+                type: "webrtc_offer",
+                offer: offer,
+                target_id: targetId,
+                sender_id: localId
+            }));
+        }
+
+        // ========================
+        // Обработчики событий
+        // ========================
+
+        // Обработчик сообщений WebSocket
+        ws.onmessage = async (e) => {
+            const msg = JSON.parse(e.data);
+
+            switch (msg.type) {
+                case "user_joined":
+                    updateUsersList(msg.users);
+                    addSystemMessage(`Пользователь ${msg.user_id} подключился`);
+                    if (msg.user_id !== localId && Object.keys(rooms[roomId]).length === 2) {
+                        // Автоматически звоним новому пользователю, если мы вдвоем в комнате
+                        callUser(msg.user_id);
+                    }
+                    break;
+
+                case "user_left":
+                    updateUsersList(msg.users);
+                    addSystemMessage(`Пользователь ${msg.user_id} отключился`);
+                    break;
+
+                case "new_message":
+                    addMessageToChat(msg.message.sender, msg.message.text);
+                    break;
+
+                case "incoming_file":
+                    addMessageToChat(msg.sender, msg.file_name, 'file', msg.url);
+                    break;
+
+                case "chat_history":
+                    msg.messages.forEach(m => {
+                        if (m.type === 'user_message') {
+                            addMessageToChat(m.sender, m.text);
+                        } else {
+                            addSystemMessage(m.text);
+                        }
+                    });
+                    break;
+
+                case "webrtc_offer":
+                    if (!peerConnection) await setupPeerConnection();
+
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.offer));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+
+                    ws.send(JSON.stringify({
+                        type: "webrtc_answer",
+                        answer: answer,
+                        target_id: msg.sender_id,
+                        sender_id: localId
+                    }));
+                    break;
+
+                case "webrtc_answer":
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.answer));
+                    break;
+
+                case "ice_candidate":
+                    try {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                    } catch (e) {
+                        console.error("Error adding ICE candidate:", e);
+                    }
+                    break;
+            }
+        };
+
+        // Обработчики кнопок
+        startButton.onclick = startCamera;
+        screenShareButton.onclick = startScreenSharing;
+        recordButton.onclick = startRecording;
+        stopRecordButton.onclick = stopRecording;
+
+        // Отправка сообщения по Enter
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        // Автоматическое подключение при загрузке
+        window.onload = () => {
+            addSystemMessage(`Вы подключились к комнате "${roomId}" с ID: ${localId}`);
+        };
+    </script>
+</body>
+</html>
